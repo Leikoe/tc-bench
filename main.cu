@@ -1,6 +1,9 @@
+// from https://github.com/tinygrad/tinygrad/blob/master/extra/gemm/cuda_matmul.py
 #include <mma.h>
 #include <stdio.h>
 #include "utils.cu"
+
+using namespace nvcuda;
 
 #define N 1024
 #define TILE_SIZE 16
@@ -9,26 +12,65 @@
 #define IN_DTYPE unsigned char
 #define ACC_DTYPE int
 
+
 __global__ void matmul(IN_DTYPE *a, IN_DTYPE *b, ACC_DTYPE *c)
 {
-    int block_i = blockIdx.y; // block index along row (y) axis
-    int block_j = blockIdx.x; // block index along col (x) axis
+    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
+    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
+    warpM *= 4;
+    warpN *= 4;
 
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, nvcuda::wmma::row_major> a_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, nvcuda::wmma::row_major> b_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, ACC_DTYPE> acc_frag;
-
-    nvcuda::wmma::fill_fragment(acc_frag, 0.0);
-#pragma unroll
-    for (int wmma_block_index = 0; wmma_block_index < N / TILE_SIZE; wmma_block_index++)
+    wmma::fragment<wmma::matrix_a, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, wmma::col_major> a_frag[4];
+    wmma::fragment<wmma::matrix_b, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, wmma::col_major> b_frag[4];
+    wmma::fragment<wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, ACC_DTYPE> acc_frag[4][4];
+    for (int j = 0; j < 4; j++)
     {
-        nvcuda::wmma::load_matrix_sync(a_frag, a + (block_i * TILE_SIZE * N) + (wmma_block_index * TILE_SIZE), N);
-        nvcuda::wmma::load_matrix_sync(b_frag, b + (wmma_block_index * TILE_SIZE * N) + (block_j * TILE_SIZE), N);
-
-        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        for (int i = 0; i < 4; i++)
+        {
+            wmma::fill_fragment(acc_frag[i][j], 0.0f);
+        }
     }
 
-    nvcuda::wmma::store_matrix_sync(c + (block_i * TILE_SIZE * N) + (block_j * TILE_SIZE), acc_frag, N, nvcuda::wmma::mem_row_major);
+    for (int k = 0; k < N; k += TILE_SIZE)
+    {
+        int aRow = warpM * TILE_SIZE;
+        int aCol = k;
+        int bRow = k;
+        int bCol = warpN * TILE_SIZE;
+
+        wmma::load_matrix_sync(a_frag[0], a + aRow + 0 * TILE_SIZE + aCol * N, N);
+        wmma::load_matrix_sync(a_frag[1], a + aRow + 1 * TILE_SIZE + aCol * N, N);
+        wmma::load_matrix_sync(a_frag[2], a + aRow + 2 * TILE_SIZE + aCol * N, N);
+        wmma::load_matrix_sync(a_frag[3], a + aRow + 3 * TILE_SIZE + aCol * N, N);
+
+        wmma::load_matrix_sync(b_frag[0], b + bRow + (0 * TILE_SIZE + bCol) * N, N);
+        wmma::load_matrix_sync(b_frag[1], b + bRow + (1 * TILE_SIZE + bCol) * N, N);
+        wmma::load_matrix_sync(b_frag[2], b + bRow + (2 * TILE_SIZE + bCol) * N, N);
+        wmma::load_matrix_sync(b_frag[3], b + bRow + (3 * TILE_SIZE + bCol) * N, N);
+
+#pragma unroll
+        for (int j = 0; j < 4; j++)
+        {
+#pragma unroll
+            for (int i = 0; i < 4; i++)
+            {
+                wmma::mma_sync(acc_frag[i][j], a_frag[i], b_frag[j], acc_frag[i][j]);
+            }
+        }
+    }
+
+    for (int j = 0; j < 4; j++)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            // wmma::fragment<wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, float> acc_store;
+            // for (int t = 0; t < acc_frag[i][j].num_elements; t++)
+            //     acc_store.x[t] = acc_frag[i][j].x[t];
+            int cRow = (warpM + i) * TILE_SIZE;
+            int cCol = (warpN + j) * TILE_SIZE;
+            wmma::store_matrix_sync(c + cRow + cCol * N, acc_frag[i][j], N, wmma::mem_col_major);
+        }
+    }
 }
 
 int main()
@@ -60,7 +102,7 @@ int main()
     cudaMemcpy(d_a, a_h, N * N * sizeof(IN_DTYPE), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, b_h, N * N * sizeof(IN_DTYPE), cudaMemcpyHostToDevice);
 
-    dim3 grid_dim(CEIL_DIV(N, TILE_SIZE), CEIL_DIV(N, TILE_SIZE));
+    dim3 grid_dim(CEIL_DIV(N, TILE_SIZE * 4), CEIL_DIV(N, TILE_SIZE * 4));
     dim3 block_dim(WARP_SIZE);
     printf("LAUNCHING with grid_dim: (%d, %d) and block_dim: %d\n", grid_dim.x, grid_dim.y, block_dim.x);
 
