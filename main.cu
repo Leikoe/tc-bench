@@ -1,11 +1,8 @@
-// from https://github.com/tinygrad/tinygrad/blob/master/extra/gemm/cuda_matmul.py
+// very heavily modified https://github.com/NVIDIA/CUDALibrarySamples/blob/master/cuBLASLt/LtFp8Matmul/sample_cublasLt_LtFp8Matmul.cu
 #include <time.h>
-#include <mma.h>
 #include <stdio.h>
 #include <cublasLt.h>
 #include "helpers.h"
-
-using namespace nvcuda;
 
 #define N 4096
 #define TILE_SIZE 16
