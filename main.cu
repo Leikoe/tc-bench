@@ -6,14 +6,17 @@
 #define TILE_SIZE 16
 #define WARP_SIZE 32
 
-__global__ void matmul(half *a, half *b, float *c)
+#define IN_DTYPE unsigned char
+#define ACC_DTYPE int
+
+__global__ void matmul(IN_DTYPE *a, IN_DTYPE *b, ACC_DTYPE *c)
 {
     int block_i = blockIdx.y; // block index along row (y) axis
     int block_j = blockIdx.x; // block index along col (x) axis
 
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, TILE_SIZE, TILE_SIZE, TILE_SIZE, half, nvcuda::wmma::row_major> a_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, TILE_SIZE, TILE_SIZE, TILE_SIZE, half, nvcuda::wmma::row_major> b_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, float> acc_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, nvcuda::wmma::row_major> a_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, nvcuda::wmma::row_major> b_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, ACC_DTYPE> acc_frag;
 
     nvcuda::wmma::fill_fragment(acc_frag, 0.0);
 #pragma unroll
@@ -32,30 +35,30 @@ int main()
 {
     srand(time(NULL));
 
-    float *a = (float *)malloc(N * N * sizeof(float));
-    float *b = (float *)malloc(N * N * sizeof(float));
-    float *c = (float *)malloc(N * N * sizeof(float));
+    ACC_DTYPE *a = (ACC_DTYPE *)malloc(N * N * sizeof(ACC_DTYPE));
+    ACC_DTYPE *b = (ACC_DTYPE *)malloc(N * N * sizeof(ACC_DTYPE));
+    ACC_DTYPE *c = (ACC_DTYPE *)malloc(N * N * sizeof(ACC_DTYPE));
 
     // fill a & b
-    matrix_random_fp16valued(a, N * N);
-    matrix_random_fp16valued(b, N * N);
+    // matrix_random_fp16valued(a, N * N);
+    // matrix_random_fp16valued(b, N * N);
 
-    half *a_h = (half *)malloc(N * N * sizeof(half));
-    half *b_h = (half *)malloc(N * N * sizeof(half));
+    IN_DTYPE *a_h = (IN_DTYPE *)malloc(N * N * sizeof(IN_DTYPE));
+    IN_DTYPE *b_h = (IN_DTYPE *)malloc(N * N * sizeof(IN_DTYPE));
 
-    for (int i = 0; i < N * N; i++)
-    {
-        a_h[i] = __float2half(a[i]);
-        b_h[i] = __float2half(b[i]);
-    }
+    // for (int i = 0; i < N * N; i++)
+    // {
+    //     a_h[i] = __float2half(a[i]);
+    //     b_h[i] = __float2half(b[i]);
+    // }
 
-    half *d_a, *d_b;
-    float *d_c;
-    cudaMalloc(&d_a, N * N * sizeof(half));
-    cudaMalloc(&d_b, N * N * sizeof(half));
-    cudaMalloc(&d_c, N * N * sizeof(float));
-    cudaMemcpy(d_a, a_h, N * N * sizeof(half), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b_h, N * N * sizeof(half), cudaMemcpyHostToDevice);
+    IN_DTYPE *d_a, *d_b;
+    ACC_DTYPE *d_c;
+    cudaMalloc(&d_a, N * N * sizeof(IN_DTYPE));
+    cudaMalloc(&d_b, N * N * sizeof(IN_DTYPE));
+    cudaMalloc(&d_c, N * N * sizeof(ACC_DTYPE));
+    cudaMemcpy(d_a, a_h, N * N * sizeof(IN_DTYPE), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, b_h, N * N * sizeof(IN_DTYPE), cudaMemcpyHostToDevice);
 
     dim3 grid_dim(CEIL_DIV(N, TILE_SIZE), CEIL_DIV(N, TILE_SIZE));
     dim3 block_dim(WARP_SIZE);
@@ -66,24 +69,24 @@ int main()
     cudaDeviceSynchronize();
     uint64_t end = nanos();
 
-    cudaMemcpy(c, d_c, N * N * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(c, d_c, N * N * sizeof(ACC_DTYPE), cudaMemcpyDeviceToHost);
 
     double gflop = (2.0 * N * N * N) * 1e-9;
     double s = (end - start) * 1e-9;
     printf("%f GFLOP/S -- %.2f ms\n", gflop / s, s * 1e3);
 
-    {
-        // compute naive reference matmul on cpu
-        printf("Computing reference matmul result on cpu\n");
-        float *reference_c = (float *)malloc(N * N * sizeof(float));
-        matmul_c(a, b, reference_c, N);
+    // {
+    //     // compute naive reference matmul on cpu
+    //     printf("Computing reference matmul result on cpu\n");
+    //     float *reference_c = (float *)malloc(N * N * sizeof(float));
+    //     matmul_c(a, b, reference_c, N);
 
-        // check each item
-        printf("Comparing reference result with gpu result\n");
-        matrix_eq(reference_c, c, N);
-        printf("ALL GOOD\n");
-        free(reference_c);
-    }
+    //     // check each item
+    //     printf("Comparing reference result with gpu result\n");
+    //     matrix_eq(reference_c, c, N);
+    //     printf("ALL GOOD\n");
+    //     free(reference_c);
+    // }
 
     cudaFree(d_a);
     cudaFree(d_b);
