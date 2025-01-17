@@ -115,7 +115,7 @@ int main()
 
     double gflop = (2.0 * N * N * N) * 1e-9;
     double s = (end - start) * 1e-9;
-    printf("%f GFLOP/S -- %.2f ms\n", gflop / s, s * 1e3);
+    printf("%f TOPS -- %.2f ms\n", (gflop / 1000.) / s, s * 1e3);
 
     // {
     //     // compute naive reference matmul on cpu
