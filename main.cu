@@ -4,6 +4,7 @@
 #include <cublasLt.h>
 #include "helpers.h"
 
+#define ITERS 1000
 #define N 4096
 #define TILE_SIZE 16
 #define WARP_SIZE 32
@@ -64,49 +65,31 @@ int main()
     int32_t beta = 0;
 
     uint64_t start = nanos();
-    int r = cublasLtMatmul(ltHandle,
-                           operationDesc,
-                           &alpha,
-                           A,
-                           Adesc,
-                           B,
-                           Bdesc,
-                           &beta,
-                           C,
-                           Cdesc,
-                           C,
-                           Cdesc,
-                           &heuristicResult.algo,
-                           workspace,
-                           workspaceSize,
-                           0);
 
-    switch (r)
+    for (int i = 0; i < ITERS; i++)
     {
-    case CUBLAS_STATUS_NOT_INITIALIZED:
-        printf("CUBLAS_STATUS_NOT_INITIALIZED\n");
-        break;
-    case CUBLAS_STATUS_INVALID_VALUE:
-        printf("CUBLAS_STATUS_INVALID_VALUE\n");
-        break;
-    case CUBLAS_STATUS_NOT_SUPPORTED:
-        printf("CUBLAS_STATUS_NOT_SUPPORTED\n");
-        break;
-    case CUBLAS_STATUS_ARCH_MISMATCH:
-        printf("CUBLAS_STATUS_ARCH_MISMATCH\n");
-        break;
-    case CUBLAS_STATUS_EXECUTION_FAILED:
-        printf("CUBLAS_STATUS_EXECUTION_FAILED\n");
-        break;
-    case CUBLAS_STATUS_SUCCESS:
-        printf("CUBLAS_STATUS_SUCCESS\n");
-        break;
+        checkCublasStatus(cublasLtMatmul(ltHandle,
+                                         operationDesc,
+                                         &alpha,
+                                         A,
+                                         Adesc,
+                                         B,
+                                         Bdesc,
+                                         &beta,
+                                         C,
+                                         Cdesc,
+                                         C,
+                                         Cdesc,
+                                         &heuristicResult.algo,
+                                         workspace,
+                                         workspaceSize,
+                                         0));
     }
 
     cudaDeviceSynchronize();
     uint64_t end = nanos();
 
-    double gflop = (2.0 * N * N * N) * 1e-9;
+    double gflop = (2.0 * N * N * N) * 1e-9 * (float)ITERS;
     double s = (end - start) * 1e-9;
     printf("%f TOPS -- %.2f ms\n", (gflop / 1000.) / s, s * 1e3);
 
