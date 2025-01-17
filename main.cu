@@ -1,141 +1,125 @@
 // from https://github.com/tinygrad/tinygrad/blob/master/extra/gemm/cuda_matmul.py
+#include <time.h>
 #include <mma.h>
 #include <stdio.h>
-#include "utils.cu"
+#include <cublasLt.h>
+#include "helpers.h"
 
 using namespace nvcuda;
 
-#define N 1024
+#define N 4096
 #define TILE_SIZE 16
 #define WARP_SIZE 32
 
-#define IN_DTYPE unsigned char
-#define ACC_DTYPE int
-
-
-__global__ void matmul(IN_DTYPE *a, IN_DTYPE *b, ACC_DTYPE *c)
+uint64_t nanos()
 {
-    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
-    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
-    warpM *= 4;
-    warpN *= 4;
-
-    wmma::fragment<wmma::matrix_a, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, wmma::col_major> a_frag[4];
-    wmma::fragment<wmma::matrix_b, TILE_SIZE, TILE_SIZE, TILE_SIZE, IN_DTYPE, wmma::col_major> b_frag[4];
-    wmma::fragment<wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, ACC_DTYPE> acc_frag[4][4];
-    for (int j = 0; j < 4; j++)
-    {
-        for (int i = 0; i < 4; i++)
-        {
-            wmma::fill_fragment(acc_frag[i][j], 0.0f);
-        }
-    }
-
-    for (int k = 0; k < N; k += TILE_SIZE)
-    {
-        int aRow = warpM * TILE_SIZE;
-        int aCol = k;
-        int bRow = k;
-        int bCol = warpN * TILE_SIZE;
-
-        wmma::load_matrix_sync(a_frag[0], a + aRow + 0 * TILE_SIZE + aCol * N, N);
-        wmma::load_matrix_sync(a_frag[1], a + aRow + 1 * TILE_SIZE + aCol * N, N);
-        wmma::load_matrix_sync(a_frag[2], a + aRow + 2 * TILE_SIZE + aCol * N, N);
-        wmma::load_matrix_sync(a_frag[3], a + aRow + 3 * TILE_SIZE + aCol * N, N);
-
-        wmma::load_matrix_sync(b_frag[0], b + bRow + (0 * TILE_SIZE + bCol) * N, N);
-        wmma::load_matrix_sync(b_frag[1], b + bRow + (1 * TILE_SIZE + bCol) * N, N);
-        wmma::load_matrix_sync(b_frag[2], b + bRow + (2 * TILE_SIZE + bCol) * N, N);
-        wmma::load_matrix_sync(b_frag[3], b + bRow + (3 * TILE_SIZE + bCol) * N, N);
-
-#pragma unroll
-        for (int j = 0; j < 4; j++)
-        {
-#pragma unroll
-            for (int i = 0; i < 4; i++)
-            {
-                wmma::mma_sync(acc_frag[i][j], a_frag[i], b_frag[j], acc_frag[i][j]);
-            }
-        }
-    }
-
-    for (int j = 0; j < 4; j++)
-    {
-        for (int i = 0; i < 4; i++)
-        {
-            // wmma::fragment<wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, float> acc_store;
-            // for (int t = 0; t < acc_frag[i][j].num_elements; t++)
-            //     acc_store.x[t] = acc_frag[i][j].x[t];
-            int cRow = (warpM + i) * TILE_SIZE;
-            int cCol = (warpN + j) * TILE_SIZE;
-            wmma::store_matrix_sync(c + cRow + cCol * N, acc_frag[i][j], N, wmma::mem_col_major);
-        }
-    }
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+    return (uint64_t)start.tv_sec * 1000000000 + (uint64_t)start.tv_nsec;
 }
 
 int main()
 {
     srand(time(NULL));
 
-    ACC_DTYPE *a = (ACC_DTYPE *)malloc(N * N * sizeof(ACC_DTYPE));
-    ACC_DTYPE *b = (ACC_DTYPE *)malloc(N * N * sizeof(ACC_DTYPE));
-    ACC_DTYPE *c = (ACC_DTYPE *)malloc(N * N * sizeof(ACC_DTYPE));
+    cublasLtHandle_t ltHandle;
+    cublasLtCreate(&ltHandle);
 
-    // fill a & b
-    // matrix_random_fp16valued(a, N * N);
-    // matrix_random_fp16valued(b, N * N);
+    int m = N;
+    int k = N;
+    int n = N;
 
-    IN_DTYPE *a_h = (IN_DTYPE *)malloc(N * N * sizeof(IN_DTYPE));
-    IN_DTYPE *b_h = (IN_DTYPE *)malloc(N * N * sizeof(IN_DTYPE));
+    unsigned char *A, *B;
+    int *C;
+    cudaMalloc(&A, N * N * sizeof(unsigned char));
+    cudaMalloc(&B, N * N * sizeof(unsigned char));
+    cudaMalloc(&C, N * N * sizeof(int));
 
-    // for (int i = 0; i < N * N; i++)
-    // {
-    //     a_h[i] = __float2half(a[i]);
-    //     b_h[i] = __float2half(b[i]);
-    // }
+    size_t workspaceSize = 1024 * 1024 * 4;
+    void *workspace;
+    cudaMalloc(&workspace, workspaceSize);
 
-    IN_DTYPE *d_a, *d_b;
-    ACC_DTYPE *d_c;
-    cudaMalloc(&d_a, N * N * sizeof(IN_DTYPE));
-    cudaMalloc(&d_b, N * N * sizeof(IN_DTYPE));
-    cudaMalloc(&d_c, N * N * sizeof(ACC_DTYPE));
-    cudaMemcpy(d_a, a_h, N * N * sizeof(IN_DTYPE), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b_h, N * N * sizeof(IN_DTYPE), cudaMemcpyHostToDevice);
+    cublasLtMatmulDesc_t operationDesc = NULL;
+    cublasOperation_t transb = CUBLAS_OP_T;
+    checkCublasStatus(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32I, CUDA_R_32I));
+    checkCublasStatus(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)));
 
-    dim3 grid_dim(CEIL_DIV(N, TILE_SIZE * 4), CEIL_DIV(N, TILE_SIZE * 4));
-    dim3 block_dim(WARP_SIZE);
-    printf("LAUNCHING with grid_dim: (%d, %d) and block_dim: %d\n", grid_dim.x, grid_dim.y, block_dim.x);
+    cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
+    checkCublasStatus(cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_8I, m, k, k));
+    checkCublasStatus(cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8I, k, n, n));
+    checkCublasStatus(cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32I, m, n, n));
+
+    cublasLtMatmulPreference_t preference = NULL;
+    checkCublasStatus(cublasLtMatmulPreferenceCreate(&preference));
+    checkCublasStatus(cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
+
+    int returnedResults = 0;
+    cublasLtMatmulHeuristicResult_t heuristicResult = {};
+    checkCublasStatus(cublasLtMatmulAlgoGetHeuristic(ltHandle, operationDesc, Adesc, Bdesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults));
+
+    if (returnedResults == 0)
+    {
+        checkCublasStatus(CUBLAS_STATUS_NOT_SUPPORTED);
+    }
+
+    // Scaling factors
+    int32_t alpha = 1;
+    int32_t beta = 0;
 
     uint64_t start = nanos();
-    matmul<<<grid_dim, block_dim>>>(d_a, d_b, d_c);
+    int r = cublasLtMatmul(ltHandle,
+                           operationDesc,
+                           &alpha,
+                           A,
+                           Adesc,
+                           B,
+                           Bdesc,
+                           &beta,
+                           C,
+                           Cdesc,
+                           C,
+                           Cdesc,
+                           &heuristicResult.algo,
+                           workspace,
+                           workspaceSize,
+                           0);
+
+    switch (r)
+    {
+    case CUBLAS_STATUS_NOT_INITIALIZED:
+        printf("CUBLAS_STATUS_NOT_INITIALIZED\n");
+        break;
+    case CUBLAS_STATUS_INVALID_VALUE:
+        printf("CUBLAS_STATUS_INVALID_VALUE\n");
+        break;
+    case CUBLAS_STATUS_NOT_SUPPORTED:
+        printf("CUBLAS_STATUS_NOT_SUPPORTED\n");
+        break;
+    case CUBLAS_STATUS_ARCH_MISMATCH:
+        printf("CUBLAS_STATUS_ARCH_MISMATCH\n");
+        break;
+    case CUBLAS_STATUS_EXECUTION_FAILED:
+        printf("CUBLAS_STATUS_EXECUTION_FAILED\n");
+        break;
+    case CUBLAS_STATUS_SUCCESS:
+        printf("CUBLAS_STATUS_SUCCESS\n");
+        break;
+    }
+
     cudaDeviceSynchronize();
     uint64_t end = nanos();
-
-    cudaMemcpy(c, d_c, N * N * sizeof(ACC_DTYPE), cudaMemcpyDeviceToHost);
 
     double gflop = (2.0 * N * N * N) * 1e-9;
     double s = (end - start) * 1e-9;
     printf("%f TOPS -- %.2f ms\n", (gflop / 1000.) / s, s * 1e3);
 
-    // {
-    //     // compute naive reference matmul on cpu
-    //     printf("Computing reference matmul result on cpu\n");
-    //     float *reference_c = (float *)malloc(N * N * sizeof(float));
-    //     matmul_c(a, b, reference_c, N);
-
-    //     // check each item
-    //     printf("Comparing reference result with gpu result\n");
-    //     matrix_eq(reference_c, c, N);
-    //     printf("ALL GOOD\n");
-    //     free(reference_c);
-    // }
-
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_c);
-    free(a_h);
-    free(b_h);
-    free(a);
-    free(b);
-    free(c);
+    checkCublasStatus(cublasLtMatmulPreferenceDestroy(preference));
+    checkCublasStatus(cublasLtMatrixLayoutDestroy(Cdesc));
+    checkCublasStatus(cublasLtMatrixLayoutDestroy(Bdesc));
+    checkCublasStatus(cublasLtMatrixLayoutDestroy(Adesc));
+    checkCublasStatus(cublasLtMatmulDescDestroy(operationDesc));
+    cudaFree(A);
+    cudaFree(B);
+    cudaFree(C);
+    cudaFree(workspace);
 }
