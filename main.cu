@@ -4,7 +4,7 @@
 #include <cublasLt.h>
 #include "helpers.h"
 
-#define ITERS 1000
+#define ITERS 100
 #define N 4096
 #define TILE_SIZE 16
 #define WARP_SIZE 32
